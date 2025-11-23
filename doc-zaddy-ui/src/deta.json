@@ -1,0 +1,13 @@
+{
+  "name": "doc-zaddy",
+  "engine": "python3.11",
+  "public": true,
+  "frontend": {
+    "path": "doc-zaddy-ui/build",
+    "spa": true
+  },
+  "backend": {
+    "src": "doc_zaddy.py",
+    "run": "uvicorn doc_zaddy:app --host 0.0.0.0 --port 8000"
+  }
+}

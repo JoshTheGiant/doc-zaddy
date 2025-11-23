@@ -1,0 +1,176 @@
+import logging
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+import os
+
+# Optional: import MeTTa if used
+try:
+    from hyperon import MeTTa
+except Exception:
+    MeTTa = None  # allow fallback if hyperon unavailable
+
+# -----------------------------------------------------------------------------
+# Initialize
+# -----------------------------------------------------------------------------
+app = FastAPI(title="DocZaddy Diagnosis API")
+log = logging.getLogger("doczaddy")
+logging.basicConfig(level=logging.INFO)
+
+# ----------------------------------------------------------------------------- 
+# CORS setup (frontend access)
+# -----------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # restrict this when deploying to production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ----------------------------------------------------------------------------- 
+# Load MeTTa Knowledge Base (best-effort)
+# -----------------------------------------------------------------------------
+metta = None
+if MeTTa is not None:
+    try:
+        metta = MeTTa()
+        if os.path.exists("reasoning.metta"):
+            metta.run("!(include reasoning.metta)")
+            log.info("✅ Loaded reasoning.metta successfully")
+        else:
+            log.warning("⚠️ reasoning.metta not found, MeTTa loaded but no KB included")
+    except Exception as e:
+        log.error("❌ Failed to load reasoning.metta: %s", e)
+        metta = None
+else:
+    log.warning("⚠️ hyperon.MeTTa not available; running with simple fallback matcher")
+
+# ----------------------------------------------------------------------------- 
+# Simple in-memory disease–symptom reference (fallback / fast scan)
+# -----------------------------------------------------------------------------
+DISEASE_SYMPTOMS = {
+    "flu": ["fever", "cough", "sore_throat"],
+    "covid19": ["fever", "cough", "loss_of_smell"],
+    "cold": ["sneezing", "cough", "runny_nose"],
+    "malaria": ["fever", "chills", "headache"],
+    "typhoid": ["fever", "abdominal_pain", "weakness"]
+}
+
+# ----------------------------------------------------------------------------- 
+# Core diagnosis logic (fallback if MeTTa not used)
+# -----------------------------------------------------------------------------
+def score_diseases(symptoms):
+    """
+    Simple matcher: counts overlap of provided symptoms with each disease.
+    Returns a list of tuples (disease, matched_count, total_symptoms).
+    """
+    # normalize tokens to underscore format used in DISEASE_SYMPTOMS
+    norm = [str(s).strip().lower().replace(" ", "_") for s in symptoms]
+    results = []
+    for disease, known_symptoms in DISEASE_SYMPTOMS.items():
+        matched = len(set(norm) & set(known_symptoms))
+        total = len(known_symptoms)
+        results.append((disease, matched, total))
+    # sort by matched desc, then by fraction desc, then by fewer total symptoms
+    results.sort(key=lambda x: (x[1], (x[1] / x[2] if x[2] else 0), -x[2]), reverse=True)
+    return results
+
+
+def _compute_diagnosis_from_symptoms(symptoms):
+    """Compute diagnosis results (attempt MeTTa first, fallback to in-memory)."""
+    try:
+        # If you have a MeTTa-based diagnosis routine, you can call it here.
+        # For now we use the simple in-memory scorer for speed and portability.
+        scores = score_diseases(symptoms)
+        results = []
+        for disease, matched, total in scores:
+            if matched == 0:
+                continue
+            confidence = matched / total if total else 0
+            results.append({
+                "disease": disease,
+                "matched": matched,
+                "total": total,
+                "confidence": round(confidence, 2)
+            })
+        return results
+    except Exception as e:
+        log.exception("Diagnosis computation failed: %s", e)
+        return []
+
+# ----------------------------------------------------------------------------- 
+# API Endpoints
+# -----------------------------------------------------------------------------
+@app.post("/api/diagnose")
+async def diagnose_api(request: Request):
+    data = await request.json()
+    symptoms = data.get("symptoms", [])
+    log.info(f"[POST /api/diagnose] Symptoms: {symptoms}")
+    if not isinstance(symptoms, list):
+        return JSONResponse({"error": "symptoms must be a JSON array"}, status_code=400)
+    results = _compute_diagnosis_from_symptoms(symptoms)
+    return JSONResponse({"results": results})
+
+
+@app.post("/diagnose")
+async def diagnose_alias(request: Request):
+    data = await request.json()
+    symptoms = data.get("symptoms", [])
+    log.info(f"[POST /diagnose] Symptoms: {symptoms} (alias)")
+    if not isinstance(symptoms, list):
+        return JSONResponse({"error": "symptoms must be a JSON array"}, status_code=400)
+    results = _compute_diagnosis_from_symptoms(symptoms)
+    return JSONResponse({"results": results})
+
+# ----------------------------------------------------------------------------- 
+# Serve React build (static frontend)
+# -----------------------------------------------------------------------------
+# NOTE: your repo currently has frontend/index.html and frontend/static/ already.
+# We support both layout possibilities:
+# - frontend/build/ (typical CRA copy)
+# - frontend/ (when build files already placed directly)
+PROJECT_DIR = os.path.dirname(__file__)
+FRONTEND_DIR = os.path.join(PROJECT_DIR, "frontend")
+FRONTEND_BUILD_DIR = os.path.join(FRONTEND_DIR, "build")
+
+# Prefer build directory if it exists, otherwise serve frontend/ directly.
+if os.path.exists(FRONTEND_BUILD_DIR):
+    static_root = FRONTEND_BUILD_DIR
+    log.info(f"✅ Serving React from {FRONTEND_BUILD_DIR}")
+elif os.path.exists(FRONTEND_DIR) and os.path.exists(os.path.join(FRONTEND_DIR, "index.html")):
+    static_root = FRONTEND_DIR
+    log.info(f"✅ Serving React from {FRONTEND_DIR}")
+else:
+    static_root = None
+    log.warning("⚠️ Frontend build not found in either frontend/build or frontend/")
+
+# Mount static assets if found
+if static_root:
+    # mount static files (JS/CSS/images) under /static if the folder exists
+    static_dir = os.path.join(static_root, "static")
+    if os.path.exists(static_dir):
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    # mount the whole front-end folder for HTML files and index
+    app.mount("/", StaticFiles(directory=static_root, html=True), name="frontend")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        index_file = os.path.join(static_root, "index.html")
+        if os.path.exists(index_file):
+            return FileResponse(index_file)
+        return JSONResponse({"error": "Frontend index.html not found"}, status_code=404)
+else:
+    # No frontend: keep API-only mode
+    @app.get("/")
+    async def api_root():
+        return {"message": "DocZaddy API active (no frontend present)"}
+
+# ----------------------------------------------------------------------------- 
+# Run manually (use `uvicorn doc_zaddy:app --reload --port 8001`)
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", "8001"))
+    uvicorn.run(app, host="127.0.0.1", port=port, reload=True)
