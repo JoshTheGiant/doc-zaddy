@@ -1,0 +1,13 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore virtual environment
+.venv/
+
+# Ignore VS Code / Visual Studio files
+.vs/
+*.suo
+*.sqlite
+
+# Ignore anything else you don't need
