@@ -11,27 +11,44 @@ try:
 except Exception:
     MeTTa = None  # allow fallback if hyperon unavailable
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 # Initialize
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 app = FastAPI(title="DocZaddy Diagnosis API")
 log = logging.getLogger("doczaddy")
 logging.basicConfig(level=logging.INFO)
 
 # ----------------------------------------------------------------------------- 
 # CORS setup (frontend access)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
+# CORRECTED: use exact allowed origin(s) and no wildcard for credentials
+ALLOWED_ORIGINS = [
+    "https://doc-zaddy.onrender.com",  # <--- your deployed frontend origin
+    # add other frontend origins if needed
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restrict this when deploying to production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Middleware to ensure every response echoes the requesting origin (required for credentials)
+@app.middleware("http")
+async def ensure_cors(request: Request, call_next):
+    resp = await call_next(request)
+    origin = request.headers.get("origin")
+    if origin and origin in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Vary"] = "Origin"
+    return resp
+
 # ----------------------------------------------------------------------------- 
 # Load MeTTa Knowledge Base (best-effort)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 metta = None
 if MeTTa is not None:
     try:
@@ -49,7 +66,7 @@ else:
 
 # ----------------------------------------------------------------------------- 
 # Simple in-memory disease–symptom reference (fallback / fast scan)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 DISEASE_SYMPTOMS = {
     "flu": ["fever", "cough", "sore_throat"],
     "covid19": ["fever", "cough", "loss_of_smell"],
@@ -60,29 +77,20 @@ DISEASE_SYMPTOMS = {
 
 # ----------------------------------------------------------------------------- 
 # Core diagnosis logic (fallback if MeTTa not used)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 def score_diseases(symptoms):
-    """
-    Simple matcher: counts overlap of provided symptoms with each disease.
-    Returns a list of tuples (disease, matched_count, total_symptoms).
-    """
-    # normalize tokens to underscore format used in DISEASE_SYMPTOMS
     norm = [str(s).strip().lower().replace(" ", "_") for s in symptoms]
     results = []
     for disease, known_symptoms in DISEASE_SYMPTOMS.items():
         matched = len(set(norm) & set(known_symptoms))
         total = len(known_symptoms)
         results.append((disease, matched, total))
-    # sort by matched desc, then by fraction desc, then by fewer total symptoms
     results.sort(key=lambda x: (x[1], (x[1] / x[2] if x[2] else 0), -x[2]), reverse=True)
     return results
 
 
 def _compute_diagnosis_from_symptoms(symptoms):
-    """Compute diagnosis results (attempt MeTTa first, fallback to in-memory)."""
     try:
-        # If you have a MeTTa-based diagnosis routine, you can call it here.
-        # For now we use the simple in-memory scorer for speed and portability.
         scores = score_diseases(symptoms)
         results = []
         for disease, matched, total in scores:
@@ -102,7 +110,7 @@ def _compute_diagnosis_from_symptoms(symptoms):
 
 # ----------------------------------------------------------------------------- 
 # API Endpoints
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 @app.post("/api/diagnose")
 async def diagnose_api(request: Request):
     data = await request.json()
@@ -126,16 +134,11 @@ async def diagnose_alias(request: Request):
 
 # ----------------------------------------------------------------------------- 
 # Serve React build (static frontend)
-# -----------------------------------------------------------------------------
-# NOTE: your repo currently has frontend/index.html and frontend/static/ already.
-# We support both layout possibilities:
-# - frontend/build/ (typical CRA copy)
-# - frontend/ (when build files already placed directly)
+# ----------------------------------------------------------------------------- 
 PROJECT_DIR = os.path.dirname(__file__)
 FRONTEND_DIR = os.path.join(PROJECT_DIR, "frontend")
 FRONTEND_BUILD_DIR = os.path.join(FRONTEND_DIR, "build")
 
-# Prefer build directory if it exists, otherwise serve frontend/ directly.
 if os.path.exists(FRONTEND_BUILD_DIR):
     static_root = FRONTEND_BUILD_DIR
     log.info(f"✅ Serving React from {FRONTEND_BUILD_DIR}")
@@ -146,13 +149,10 @@ else:
     static_root = None
     log.warning("⚠️ Frontend build not found in either frontend/build or frontend/")
 
-# Mount static assets if found
 if static_root:
-    # mount static files (JS/CSS/images) under /static if the folder exists
     static_dir = os.path.join(static_root, "static")
     if os.path.exists(static_dir):
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
-    # mount the whole front-end folder for HTML files and index
     app.mount("/", StaticFiles(directory=static_root, html=True), name="frontend")
 
     @app.get("/{full_path:path}")
@@ -162,14 +162,13 @@ if static_root:
             return FileResponse(index_file)
         return JSONResponse({"error": "Frontend index.html not found"}, status_code=404)
 else:
-    # No frontend: keep API-only mode
     @app.get("/")
     async def api_root():
         return {"message": "DocZaddy API active (no frontend present)"}
 
 # ----------------------------------------------------------------------------- 
 # Run manually (use `uvicorn doc_zaddy:app --reload --port 8001`)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8001"))
