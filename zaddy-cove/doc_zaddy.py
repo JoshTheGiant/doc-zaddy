@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 import os
 
@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 # ----------------------------------------------------------------------------- 
 # CORRECTED: use exact allowed origin(s) and no wildcard for credentials
 ALLOWED_ORIGINS = [
-    "https://doc-zaddy.onrender.com",  # <--- your deployed frontend origin
+    "https://doc-zaddy.onrender.com",  # <--- your deployed frontend origin (no trailing slash)
     # add other frontend origins if needed
 ]
 
@@ -36,14 +36,41 @@ app.add_middleware(
 )
 
 # Middleware to ensure every response echoes the requesting origin (required for credentials)
+# Also explicitly handle OPTIONS preflight here to avoid proxy / caching issues.
 @app.middleware("http")
 async def ensure_cors(request: Request, call_next):
-    resp = await call_next(request)
     origin = request.headers.get("origin")
+    # If this is a preflight request, short-circuit and return a proper preflight response
+    if request.method == "OPTIONS":
+        headers = {}
+        if origin and origin in ALLOWED_ORIGINS:
+            headers.update({
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Max-Age": "600",
+                "Vary": "Origin",
+            })
+        else:
+            # respond with a minimal safe preflight if origin not allowed
+            headers.update({
+                "Access-Control-Allow-Methods": "OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            })
+        return Response(content="OK", status_code=200, headers=headers)
+
+    # For non-OPTIONS requests, call the route then ensure headers are set/overridden
+    resp = await call_next(request)
     if origin and origin in ALLOWED_ORIGINS:
+        # Echo origin (required when allow_credentials=True)
         resp.headers["Access-Control-Allow-Origin"] = origin
         resp.headers["Access-Control-Allow-Credentials"] = "true"
         resp.headers["Vary"] = "Origin"
+    else:
+        # Ensure we do NOT leave a wildcard '*' when credentials are expected
+        if "access-control-allow-origin" in resp.headers and resp.headers["access-control-allow-origin"] == "*":
+            del resp.headers["access-control-allow-origin"]
     return resp
 
 # ----------------------------------------------------------------------------- 
@@ -172,4 +199,5 @@ else:
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8001"))
-    uvicorn.run(app, host="127.0.0.1", port=port, reload=True)
+    # use 0.0.0.0 so Render / containers can bind correctly
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=True)
