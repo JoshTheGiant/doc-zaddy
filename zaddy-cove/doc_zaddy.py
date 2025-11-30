@@ -35,42 +35,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Middleware to ensure every response echoes the requesting origin (required for credentials)
-# Also explicitly handle OPTIONS preflight here to avoid proxy / caching issues.
+# ----------------------------------------------------------------------------- 
+# Strict CORS middleware: always echo allowed Origin and remove any wildcard
+# This replaces/augments the standard CORSMiddleware to ensure proxies/caches
+# can't cause responses to include 'Access-Control-Allow-Origin: *'.
+# ----------------------------------------------------------------------------- 
 @app.middleware("http")
-async def ensure_cors(request: Request, call_next):
+async def ensure_cors_strict(request: Request, call_next):
     origin = request.headers.get("origin")
-    # If this is a preflight request, short-circuit and return a proper preflight response
+
+    # Short-circuit preflight explicitly so proxies see a proper preflight response
     if request.method == "OPTIONS":
-        headers = {}
+        headers = {
+            "Access-Control-Allow-Methods": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "600",
+            "Vary": "Origin",
+        }
         if origin and origin in ALLOWED_ORIGINS:
-            headers.update({
-                "Access-Control-Allow-Origin": origin,
-                "Access-Control-Allow-Credentials": "true",
-                "Access-Control-Allow-Methods": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                "Access-Control-Max-Age": "600",
-                "Vary": "Origin",
-            })
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Credentials"] = "true"
         else:
-            # respond with a minimal safe preflight if origin not allowed
-            headers.update({
-                "Access-Control-Allow-Methods": "OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type",
-            })
+            # minimal safe preflight if origin not allowed
+            headers["Access-Control-Allow-Methods"] = "OPTIONS"
+            headers["Access-Control-Allow-Headers"] = "Content-Type"
         return Response(content="OK", status_code=200, headers=headers)
 
-    # For non-OPTIONS requests, call the route then ensure headers are set/overridden
+    # For non-OPTIONS requests, call handler and then override headers
     resp = await call_next(request)
+
+    # If a proxy injected a wildcard header, remove it first
+    # Normalize header check to lower-case as some servers may normalize names
+    if "access-control-allow-origin" in resp.headers and resp.headers["access-control-allow-origin"] == "*":
+        try:
+            del resp.headers["access-control-allow-origin"]
+        except KeyError:
+            pass
+
+    # Echo explicit origin if it's allowed
     if origin and origin in ALLOWED_ORIGINS:
-        # Echo origin (required when allow_credentials=True)
         resp.headers["Access-Control-Allow-Origin"] = origin
         resp.headers["Access-Control-Allow-Credentials"] = "true"
         resp.headers["Vary"] = "Origin"
-    else:
-        # Ensure we do NOT leave a wildcard '*' when credentials are expected
-        if "access-control-allow-origin" in resp.headers and resp.headers["access-control-allow-origin"] == "*":
-            del resp.headers["access-control-allow-origin"]
+
     return resp
 
 # ----------------------------------------------------------------------------- 
