@@ -1,0 +1,150 @@
+# This reusable workflow builds the project and tests it.
+
+# This workflow uses actions that are not certified by GitHub.  They are
+# provided by a third-party and are governed by separate terms of service,
+# privacy policy, and support documentation.
+
+name: common
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "A version of a python interpreter to use"
+        default: "3.8"
+        required: false
+        type: string
+      os:
+        description: "A container which is used to make a build"
+        default: "ubuntu-22.04"
+        required: false
+        type: string
+      cmake-version:
+        description: "CMake version to use"
+        default: "3.24.x"
+        required: false
+        type: string
+      build-type:
+        description: "One of the {Debug, Release, MinSizeRel, RelWithDebInfo} (or maybe custom) build types"
+        default: "Debug"
+        required: false
+        type: string
+
+env:
+  CMAKE_CONFIG_ARGUMENT: "${{ startsWith(inputs.os, 'windows') && format('--config {0}', inputs.build-type) || '' }}"
+  CMAKE_BUILD_TYPE_VARIABLE: "${{ !startsWith(inputs.os, 'windows') && format('-DCMAKE_BUILD_TYPE={0}', inputs.build-type) || ''}}"
+
+jobs:
+  build-all:
+    runs-on: ${{ inputs.os }}
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: actions-rs/toolchain@v1.0.6
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install protobuf-compiler (required by DAS)
+        shell: bash
+        run: |
+          if [[ "${{ inputs.os }}" == *"ubuntu"* ]]; then
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          elif [[ "${{ inputs.os }}" == *"macos"* ]]; then
+            brew install protobuf
+          elif [[ "${{ inputs.os }}" == *"windows"* ]]; then
+            choco install protoc -y
+          fi
+
+      - name: Build Rust library
+        working-directory: ./lib
+        run: |
+          cargo build
+
+      - name: Check Rust REPL
+        working-directory: ./repl
+        run: |
+          cargo check
+          cargo check --features python,git
+
+      - name: Install cbindgen
+        uses: actions-rs/cargo@v1.0.1
+        with:
+          command: install
+          args: cbindgen
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install CMake
+        uses: lukka/get-cmake@v4.1.1
+        with:
+          cmakeVersion: ${{ inputs.cmake-version }}
+
+      - name: Install Conan
+        uses: turtlebrowser/get-conan@v1.2
+        with:
+          version: "2.19.1"
+
+      - name: Setup Conan profile
+        shell: bash
+        run: |
+          conan profile detect --force
+
+      - name: Test Rust build
+        shell: bash
+        run: cargo test --features git,online-test
+
+      - name: Print environment
+        shell: bash
+        run: |
+          echo "uname -a"
+          uname -a
+          echo "rustc --version"
+          rustc --version
+          echo "cbindgen --version"
+          cbindgen --version
+          echo "python --version"
+          which python
+          python --version
+          python -c "import platform; print(platform.platform())"
+          echo "python3 --version"
+          which python3
+          python3 --version
+          python3 -c "import platform; print(platform.platform())"
+          echo "conan version"
+          conan version
+          echo "conan profile show"
+          conan profile show
+          echo "gcc --version"
+          gcc --version
+          echo "g++ --version"
+          g++ --version
+          echo "cmake --version"
+          cmake --version
+          file $(which cmake)
+          echo "make --version"
+          make --version
+          file $(which make)
+
+      - name: Setup C API build
+        run: |
+          mkdir -p build
+          cd build
+          cmake ${{env.CMAKE_BUILD_TYPE_VARIABLE}} ..
+
+      - name: Build C API
+        working-directory: ./build
+        shell: bash
+        run: cmake --build . ${{ env.CMAKE_CONFIG_ARGUMENT }}
+
+      - name: Test C API
+        working-directory: ./build
+        shell: bash
+        run: cmake --build . --target check ${{ env.CMAKE_CONFIG_ARGUMENT }}
